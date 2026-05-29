@@ -44,6 +44,9 @@ void CPasswordInputField::configure(const std::unordered_map<std::string, std::a
         dots.center              = std::any_cast<Hyprlang::INT>(props.at("dots_center"));
         dots.rounding            = std::any_cast<Hyprlang::INT>(props.at("dots_rounding"));
         dots.textFormat          = std::any_cast<Hyprlang::STRING>(props.at("dots_text_format"));
+        caret.enabled            = std::any_cast<Hyprlang::INT>(props.at("enable_caret"));
+        caret.blinkMs            = std::any_cast<Hyprlang::INT>(props.at("caret_blink"));
+        caret.width              = std::any_cast<Hyprlang::FLOAT>(props.at("caret_width"));
         fadeOnEmpty              = std::any_cast<Hyprlang::INT>(props.at("fade_on_empty"));
         fadeTimeoutMs            = std::any_cast<Hyprlang::INT>(props.at("fade_timeout"));
         hiddenInputState.enabled = std::any_cast<Hyprlang::INT>(props.at("hide_input"));
@@ -75,6 +78,7 @@ void CPasswordInputField::configure(const std::unordered_map<std::string, std::a
     pos          = posFromHVAlign(viewport, configSize, pos, halign, valign);
     dots.size    = std::clamp(dots.size, 0.001f, 0.8f);
     dots.spacing = std::clamp(dots.spacing, -1.f, 1.f);
+    caret.width  = std::clamp(caret.width, 0.01f, 1.f);
 
     colorConfig.caps = colorConfig.caps->m_bIsFallback ? colorConfig.fail : colorConfig.caps;
 
@@ -99,12 +103,20 @@ void CPasswordInputField::configure(const std::unordered_map<std::string, std::a
 
     // request the inital placeholder asset
     updatePlaceholder();
+
+    // kick off the blinking caret
+    startBlinkTimer();
 }
 
 void CPasswordInputField::reset() {
     if (fade.fadeOutTimer) {
         fade.fadeOutTimer->cancel();
         fade.fadeOutTimer.reset();
+    }
+
+    if (caret.blinkTimer) {
+        caret.blinkTimer->cancel();
+        caret.blinkTimer.reset();
     }
 
     if (g_pHyprlock->isTerminating())
@@ -121,6 +133,30 @@ void CPasswordInputField::reset() {
 static void fadeOutCallback(AWP<CPasswordInputField> ref) {
     if (const auto PP = ref.lock(); PP)
         PP->onFadeOutTimer();
+}
+
+static void blinkCallback(AWP<CPasswordInputField> ref) {
+    if (const auto PP = ref.lock(); PP)
+        PP->onBlinkTimer();
+}
+
+void CPasswordInputField::startBlinkTimer() {
+    if (caret.blinkTimer) {
+        caret.blinkTimer->cancel();
+        caret.blinkTimer.reset();
+    }
+
+    // nothing to animate if the caret is disabled or set to stay solid (blink interval of 0)
+    if (!caret.enabled || caret.blinkMs <= 0)
+        return;
+
+    caret.blinkTimer = g_pHyprlock->addTimer(std::chrono::milliseconds(caret.blinkMs), [REF = m_self](auto, auto) { blinkCallback(REF); }, nullptr);
+}
+
+void CPasswordInputField::onBlinkTimer() {
+    // re-arm and request a redraw; draw() decides visibility from the activity clock
+    startBlinkTimer();
+    g_pHyprlock->renderOutput(outputStringPort);
 }
 
 void CPasswordInputField::onFadeOutTimer() {
@@ -193,6 +229,14 @@ bool CPasswordInputField::draw(const SRenderData& data) {
     updateWidth();
     updateHiddenInputState();
 
+    // keep the caret solid while a key is physically held (incl. a held backspace on an
+    // empty field), and for one blink interval after release, then resume blinking once
+    // typing pauses - like a modern terminal. driven by held state + activity timestamp.
+    if (caret.enabled && caret.blinkMs > 0) {
+        const long SINCEINPUTMS = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - g_pHyprlock->m_tLastKeyActivity).count();
+        caret.visible           = g_pHyprlock->anyKeyHeld() || ((SINCEINPUTMS / caret.blinkMs) % 2) == 0;
+    }
+
     CBox        inputFieldBox = {pos, size->value()};
     CBox        outerBox      = {pos - Vector2D{outThick, outThick}, size->value() + Vector2D{outThick * 2, outThick * 2}};
 
@@ -257,6 +301,13 @@ bool CPasswordInputField::draw(const SRenderData& data) {
         const int    MAXDOTS      = std::round(DOTAREAWIDTH * 1.0 / (passSize.x + passSpacing));
         const int    DOTFLOORED   = std::floor(CURRDOTS);
         const auto   DOTALPHA     = fontCol.a;
+        const double STEP         = passSize.x + passSpacing;
+
+        // reserve the trailing slot for the caret so the end of the input is always visible:
+        // once the dots fill the rest, the oldest scroll off the left instead of the caret
+        // (and the freshly typed dots) vanishing off the right.
+        const int    CARETRESERVE = caret.enabled ? 1 : 0;
+        const int    MAXVISDOTS   = std::max(1, MAXDOTS - CARETRESERVE);
 
         // Calculate the total width required for all dots including spaces between them
         const double CURRWIDTH = ((passSize.x + passSpacing) * CURRDOTS) - passSpacing;
@@ -264,8 +315,9 @@ bool CPasswordInputField::draw(const SRenderData& data) {
         // Calculate starting x-position to ensure dots stay centered within the input field
         double xstart = dots.center ? ((DOTAREAWIDTH - CURRWIDTH) / 2.0) + DOTPAD : DOTPAD;
 
-        if (CURRDOTS > MAXDOTS)
-            xstart = (inputFieldBox.w + MAXDOTS * (passSize.x + passSpacing) - passSpacing - 2 * CURRWIDTH) / 2.0;
+        if (CURRDOTS > MAXVISDOTS)
+            // right-align: pin the trailing caret slot to the right edge and let the oldest dots fall off the left
+            xstart = DOTAREAWIDTH + DOTPAD - (STEP * (CURRDOTS + CARETRESERVE)) + passSpacing;
 
         if (dots.rounding == -1)
             dots.rounding = passSize.x / 2.0;
@@ -273,7 +325,8 @@ bool CPasswordInputField::draw(const SRenderData& data) {
             dots.rounding = rounding == -1 ? passSize.x / 2.0 : rounding * dots.size;
 
         for (int i = 0; i < CURRDOTS; ++i) {
-            if (i < DOTFLOORED - MAXDOTS)
+            // skip dots that have scrolled off the left edge
+            if (xstart + (i * STEP) < DOTPAD - 1.0)
                 continue;
 
             if (CURRDOTS != DOTFLOORED) {
@@ -297,6 +350,21 @@ bool CPasswordInputField::draw(const SRenderData& data) {
                 g_pRenderer->renderRect(box, fontCol, dots.rounding);
 
             fontCol.a = DOTALPHA;
+        }
+
+        // blinking caret, drawn at the slot right after the last typed dot
+        if (caret.enabled && caret.visible && !checkWaiting && !(displayFail && passwordLength == 0)) {
+            const double   CARETWIDTH = std::max(2.0, passSize.x * caret.width);
+            double         caretX     = xstart + (CURRDOTS * STEP);
+
+            // safety net: keep the caret inside the input field
+            caretX = std::clamp(caretX, DOTPAD, inputFieldBox.w - DOTPAD - CARETWIDTH);
+
+            const Vector2D caretPos = inputFieldBox.pos() + Vector2D{caretX, (inputFieldBox.h / 2.0) - (passSize.y / 2.0)};
+            CHyprColor     caretCol = fontCol;
+            caretCol.a              = DOTALPHA;
+
+            g_pRenderer->renderRect(CBox{caretPos, Vector2D{CARETWIDTH, passSize.y}}, caretCol, dots.rounding);
         }
     }
 

@@ -601,6 +601,10 @@ void CHyprlock::repeatKey(xkb_keysym_t sym) {
     renderAllOutputs();
 }
 
+bool CHyprlock::anyKeyHeld() {
+    return !m_vPressedKeys.empty();
+}
+
 void CHyprlock::onKey(uint32_t key, bool down) {
     if (!m_sLockState.locked)
         return;
@@ -622,6 +626,8 @@ void CHyprlock::onKey(uint32_t key, bool down) {
         m_vPressedKeys.push_back(key);
     else {
         std::erase(m_vPressedKeys, key);
+        // start the caret's trailing solid period from the moment the key is released
+        m_tLastKeyActivity = std::chrono::system_clock::now();
         if (m_pKeyRepeatTimer) {
             m_pKeyRepeatTimer->cancel();
             m_pKeyRepeatTimer.reset();
@@ -662,6 +668,10 @@ void CHyprlock::onKey(uint32_t key, bool down) {
 
 void CHyprlock::handleKeySym(xkb_keysym_t sym, bool composed) {
     const auto SYM = sym;
+
+    // record any key activity (incl. auto-repeats) so the input caret can stay solid
+    // while typing - this fires even for a backspace on an already-empty buffer
+    m_tLastKeyActivity = std::chrono::system_clock::now();
 
     if (SYM == XKB_KEY_Escape || (m_bCtrl && (SYM == XKB_KEY_u || SYM == XKB_KEY_BackSpace || SYM == XKB_KEY_a))) {
         Log::logger->log(Log::INFO, "Clearing password buffer");

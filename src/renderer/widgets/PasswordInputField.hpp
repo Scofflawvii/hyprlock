@@ -31,6 +31,7 @@ class CPasswordInputField : public IWidget {
 
     void         reset();
     void         onFadeOutTimer();
+    void         onBlinkTimer();
 
   private:
     AWP<CPasswordInputField> m_self;
@@ -42,6 +43,7 @@ class CPasswordInputField : public IWidget {
     void                     updateHiddenInputState();
     void                     updateInputState();
     void                     updateColors();
+    void                     startBlinkTimer();
 
     bool                     firstRender  = true;
     bool                     redrawShadow = false;
@@ -78,6 +80,14 @@ class CPasswordInputField : public IWidget {
         ASP<CTimer>       fadeOutTimer = nullptr;
         bool              allowFadeOut = false;
     } fade;
+
+    struct {
+        bool        enabled    = false;
+        int         blinkMs    = 500;
+        float       width      = 0.15f; // fraction of the dot/block width; 1.0 == full block
+        bool        visible    = true;
+        ASP<CTimer> blinkTimer = nullptr;
+    } caret;
 
     struct {
         size_t        resourceID = 0;

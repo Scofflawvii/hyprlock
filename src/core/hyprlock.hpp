@@ -66,6 +66,8 @@ class CHyprlock {
     size_t                     getPasswordBufferLen();
     size_t                     getPasswordBufferDisplayLen();
 
+    bool                       anyKeyHeld();
+
     SP<CCExtSessionLockManagerV1>    getSessionLockMgr();
     SP<CCExtSessionLockV1>           getSessionLock();
     SP<CCWlCompositor>               getCompositor();
@@ -91,6 +93,7 @@ class CHyprlock {
 
     //
     std::chrono::system_clock::time_point m_tGraceEnds;
+    std::chrono::system_clock::time_point m_tLastKeyActivity = std::chrono::system_clock::now();
     Vector2D                              m_vLastEnterCoords = {};
     WP<COutput>                           m_focusedOutput;
 
